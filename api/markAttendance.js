@@ -44,22 +44,35 @@ export default async function handler(req, res) {
         }
     }
 
-    // --- 3. SCHEDULE & TRANSACTION ---
+    // --- 3. SCHEDULE VALIDATION (FIXED: NO SORTING) ---
     const dayName = new Date(clientDate + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'long' });
     const scheduleSnap = await db.collection('config').doc('timetable_schedule').get();
+    
     if (scheduleSnap.exists) {
         const schedule = scheduleSnap.data().schedule || {};
-        const targetClass = (schedule[dayName] || [])[slotIndex];
-        if (!targetClass || targetClass.subject !== subject) return res.status(400).json({ error: "Invalid Slot/Subject" });
+        const daysClasses = schedule[dayName] || [];
+        
+        // --- REMOVED SORTING HERE --- 
+        // We trust the slotIndex provided by the frontend because it tracks the 'originalIndex'
+        
+        const targetClass = daysClasses[slotIndex];
+        
+        if (!targetClass) return res.status(400).json({ error: "Invalid Slot ID" });
+        
+        if (targetClass.subject !== subject) {
+            return res.status(400).json({ 
+                error: `Sync Error: Server expected '${targetClass.subject}' but got '${subject}'.` 
+            });
+        }
     }
 
+    // --- 4. TRANSACTION ---
     const userRef = db.collection('users').doc(uid);
     await db.runTransaction(async (t) => {
       const doc = await t.get(userRef);
       if (!doc.exists) throw new Error("User missing");
       
       const data = doc.data();
-      // Rate Limit: 2 seconds
       if (Date.now() - (data.lastUpdateTimestamp || 0) < 2000) throw new Error("Please wait a moment.");
 
       const dailyLogs = data.dailyLogs || {};
