@@ -13,6 +13,7 @@ if (!admin.apps.length) {
 const db = admin.firestore();
 
 export default async function handler(req, res) {
+  // CORS Setup
   res.setHeader('Access-Control-Allow-Credentials', true);
   res.setHeader('Access-Control-Allow-Origin', '*'); 
   res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS,POST');
@@ -29,22 +30,22 @@ export default async function handler(req, res) {
     const decodedToken = await admin.auth().verifyIdToken(token);
     const uid = decodedToken.uid; 
     
-    // --- 1. SERVER TIME CHECK ---
+    // 1. DATA PREP
     const serverDateStr = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
     const { subject, status, date: clientDate, slotIndex } = req.body;
 
     if (!subject || !status || !clientDate || slotIndex === undefined) return res.status(400).json({ error: 'Missing fields' });
-    if (clientDate > serverDateStr) return res.status(400).json({ error: "Time Travel Detected." });
+    if (clientDate > serverDateStr) return res.status(400).json({ error: "Time Travel: Future date." });
 
-    // --- 2. CANCELLATION CHECK ---
+    // 2. CANCELLATION CHECK
     const exceptionDoc = await db.collection('daily_status').doc(clientDate).get();
     if (exceptionDoc.exists) {
         if (exceptionDoc.data()[slotIndex] === 'cancelled') {
-            return res.status(403).json({ error: `⛔ Class Cancelled: Attendance is blocked for ${subject}.` });
+            return res.status(403).json({ error: `⛔ Class Cancelled: Attendance blocked.` });
         }
     }
 
-    // --- 3. SCHEDULE VALIDATION (FIXED: NO SORTING) ---
+    // 3. SCHEDULE VALIDATION (No Sorting - Trusts Frontend Index)
     const dayName = new Date(clientDate + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'long' });
     const scheduleSnap = await db.collection('config').doc('timetable_schedule').get();
     
@@ -52,13 +53,10 @@ export default async function handler(req, res) {
         const schedule = scheduleSnap.data().schedule || {};
         const daysClasses = schedule[dayName] || [];
         
-        // --- REMOVED SORTING HERE --- 
-        // We trust the slotIndex provided by the frontend because it tracks the 'originalIndex'
-        
+        // Use index directly to match frontend
         const targetClass = daysClasses[slotIndex];
         
         if (!targetClass) return res.status(400).json({ error: "Invalid Slot ID" });
-        
         if (targetClass.subject !== subject) {
             return res.status(400).json({ 
                 error: `Sync Error: Server expected '${targetClass.subject}' but got '${subject}'.` 
@@ -66,11 +64,11 @@ export default async function handler(req, res) {
         }
     }
 
-    // --- 4. TRANSACTION ---
+    // 4. TRANSACTION WITH CRASH FIX
     const userRef = db.collection('users').doc(uid);
     await db.runTransaction(async (t) => {
       const doc = await t.get(userRef);
-      if (!doc.exists) throw new Error("User missing");
+      if (!doc.exists) throw new Error("User profile missing");
       
       const data = doc.data();
       if (Date.now() - (data.lastUpdateTimestamp || 0) < 2000) throw new Error("Please wait a moment.");
@@ -90,19 +88,24 @@ export default async function handler(req, res) {
       if (stats.present < 0) stats.present = 0;
       if (stats.total < 0) stats.total = 0;
 
-      if (!dailyLogs[clientDate]) dailyLogs[clientDate] = {};
-      dailyLogs[clientDate][slotIndex] = status;
+      // Prepare nested update object
+      const dayUpdate = dailyLogs[clientDate] || {};
+      dayUpdate[slotIndex] = status;
 
-      t.update(userRef, {
-        [`attendance.${subject}`]: stats,
-        [`dailyLogs.${clientDate}`]: dailyLogs[clientDate],
+      // --- CRITICAL FIX: Use set() with merge: true ---
+      // This creates 'dailyLogs' and the date key if they don't exist
+      // preventing the "Internal Error" crash.
+      t.set(userRef, {
+        attendance: { [subject]: stats },
+        dailyLogs: { [clientDate]: dayUpdate },
         lastUpdateTimestamp: Date.now()
-      });
+      }, { merge: true });
     });
 
     return res.status(200).json({ success: true });
   } catch (error) {
-    console.error(error);
-    return res.status(500).json({ error: error.message === "Please wait a moment." ? error.message : "Internal Error" });
+    console.error("Backend Error:", error);
+    // Return the REAL error message for debugging
+    return res.status(500).json({ error: error.message || "Unknown Server Error" });
   }
 }
