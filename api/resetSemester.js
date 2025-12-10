@@ -1,4 +1,4 @@
-// resetSemester.js — improved version (replace existing file)
+javascript
 const admin = require('firebase-admin');
 
 if (!admin.apps.length) {
@@ -19,7 +19,6 @@ function chunkArray(arr, size) {
 }
 
 export default async function handler(req, res) {
-  // CORS for simplicity (adjust for production)
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS,POST');
   res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type');
@@ -31,39 +30,35 @@ export default async function handler(req, res) {
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
     return res.status(401).json({ error: 'No token provided' });
   }
-  const token = authHeader.split('Bearer ')[1];
 
   try {
+    const token = authHeader.split('Bearer ')[1];
     const decodedToken = await admin.auth().verifyIdToken(token);
     const email = decodedToken.email;
+
     if (!email || !email.endsWith('@ves.ac.in')) return res.status(403).json({ error: 'Unauthorized Domain' });
 
+    // Verify Admin Status
     const adminDoc = await db.collection('admins').doc(email).get();
     if (!adminDoc.exists) return res.status(403).json({ error: 'Not an Admin' });
 
-    // Load users
+    // Fetch and Batch Update
     const usersSnapshot = await db.collection('users').get();
-    const docs = usersSnapshot.docs;
-    if (!docs.length) return res.status(200).json({ success: true, message: 'No users to update' });
+    if (usersSnapshot.empty) return res.status(200).json({ success: true, message: 'No users to update' });
 
-    // Prepare update payload
-    const updateObjects = docs.map(doc => ({ ref: doc.ref, data: { attendance: {}, dailyLogs: {} } }));
+    const updates = usersSnapshot.docs.map(doc => ({ ref: doc.ref, data: { attendance: {}, dailyLogs: {} } }));
+    const chunks = chunkArray(updates, 400); // Safe batch size
 
-    // Chunk to <= 500 requests per batch (Firestore limit)
-    const chunks = chunkArray(updateObjects, 500);
-    for (let i = 0; i < chunks.length; i++) {
+    for (const chunk of chunks) {
       const batch = db.batch();
-      chunks[i].forEach(item => {
-        batch.update(item.ref, item.data);
-      });
+      chunk.forEach(item => batch.update(item.ref, item.data));
       await batch.commit();
-      console.log(`Committed batch ${i + 1}/${chunks.length} (${chunks[i].length} updates)`);
     }
 
-    return res.status(200).json({ success: true, batches: chunks.length, updated: docs.length });
+    return res.status(200).json({ success: true, updated: usersSnapshot.size });
+
   } catch (error) {
-    console.error('resetSemester error:', error);
-    // Provide helpful error text to client for debugging
-    return res.status(500).json({ error: 'Action Failed', message: error.message || String(error) });
+    console.error('Reset Error:', error);
+    return res.status(500).json({ error: 'Internal Server Error' });
   }
 }
