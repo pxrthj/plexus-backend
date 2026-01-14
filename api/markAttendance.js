@@ -1,12 +1,10 @@
 const admin = require('firebase-admin');
 
-// Initialize Firebase Admin if not already running
 if (!admin.apps.length) {
   admin.initializeApp({
     credential: admin.credential.cert({
       projectId: process.env.FIREBASE_PROJECT_ID,
       clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-      // Handle private key newlines correctly
       privateKey: process.env.FIREBASE_PRIVATE_KEY ? process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n') : undefined,
     }),
   });
@@ -16,7 +14,7 @@ const db = admin.firestore();
 
 export default async function handler(req, res) {
   // CORS Headers
-  res.setHeader('Access-Control-Allow-Credentials', true);
+  // REPLACE 'https://your-app.web.app' with your actual deployed domain for security
   res.setHeader('Access-Control-Allow-Origin', '*'); 
   res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS,POST');
   res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type'); 
@@ -24,7 +22,6 @@ export default async function handler(req, res) {
   if (req.method === 'OPTIONS') { res.status(200).end(); return; }
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method Not Allowed' });
 
-  // 1. VERIFY TOKEN (Security Check)
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
     return res.status(401).json({ error: 'Missing Authorization header' });
@@ -38,7 +35,6 @@ export default async function handler(req, res) {
     return res.status(403).json({ error: 'Invalid Token' });
   }
 
-  // 2. USE SECURE UID
   const uid = decodedToken.uid; 
   const { subject, status, date, slotIndex } = req.body;
 
@@ -58,8 +54,10 @@ export default async function handler(req, res) {
       const attendance = data.attendance || {};
 
       // Determine Old Status
+      // FIX: Handle composite "status|subject" strings
       const dayLog = dailyLogs[date] || {};
-      const oldStatus = dayLog[slotIndex] || 'pending';
+      const rawOldStatus = dayLog[slotIndex] || 'pending';
+      const oldStatus = rawOldStatus.includes('|') ? rawOldStatus.split('|')[0] : rawOldStatus;
 
       if (oldStatus === status) return; 
 
@@ -80,7 +78,10 @@ export default async function handler(req, res) {
 
       // Update Logs
       if (!dailyLogs[date]) dailyLogs[date] = {};
-      dailyLogs[date][slotIndex] = status;
+      
+      // FIX: Store Subject Name in the log (e.g., "present|Maths")
+      // This makes the log immune to future timetable changes
+      dailyLogs[date][slotIndex] = `${status}|${subject}`;
 
       t.update(userRef, {
         [`attendance.${subject}`]: stats,
